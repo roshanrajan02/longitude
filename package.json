@@ -1,0 +1,13 @@
+{
+  "name": "longitude",
+  "version": "0.1.0",
+  "description": "Unify Apple Health and wearable data into one local database, and serve it to your dashboard.",
+  "type": "module",
+  "scripts": {
+    "import": "bun run src/cli.ts import",
+    "serve": "bun run src/cli.ts serve",
+    "stats": "bun run src/cli.ts stats"
+  },
+  "engines": { "bun": ">=1.1.0" },
+  "license": "MIT"
+}

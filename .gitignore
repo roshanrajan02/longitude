@@ -1,0 +1,10 @@
+node_modules/
+*.db
+*.db-wal
+*.db-shm
+data/
+export.xml
+apple_health_export/
+.env
+.env.local
+.DS_Store
