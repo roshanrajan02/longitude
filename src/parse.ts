@@ -15,12 +15,20 @@
  */
 
 export type Element = {
-  name: "Record" | "Workout" | "ActivitySummary";
+  name: "Record" | "Workout" | "ActivitySummary" | "ClinicalRecord";
   attrs: Record<string, string>;
 };
 
-/** Elements worth stopping for. Correlation, Audiogram and the rest are ignored. */
-const WANTED = ["Record", "Workout", "ActivitySummary"] as const;
+/**
+ * Elements worth stopping for. Correlation, Audiogram and the rest are ignored.
+ *
+ * `ClinicalRecord` is here even though most exports contain none. It appears
+ * only once Health Records is linked to a provider in the Health app — and when
+ * it does, it is the cross-provider route to clinical data that Epic's own API
+ * cannot give you, because each health system runs a separate Epic instance
+ * behind a separate login.
+ */
+const WANTED = ["Record", "Workout", "ActivitySummary", "ClinicalRecord"] as const;
 
 /** So a chunk ending mid-name can be recognised as undecidable, not ignored. */
 const LONGEST_NAME = Math.max(...WANTED.map((w) => w.length));
@@ -243,6 +251,33 @@ export type SleepRow = {
   source: string | null;
   dedupe_key: string;
 };
+
+export type ClinicalRow = {
+  resource_type: string;
+  received_date: string | null;
+  source: string | null;
+  /** Path inside the export, relative to export.xml. */
+  file: string;
+  identifier: string;
+};
+
+/**
+ * A clinical record's metadata.
+ *
+ * The FHIR itself is not here — Apple writes each resource to its own JSON file
+ * and the element only points at it, so reading the payload needs the filesystem
+ * and belongs with the other asset importers.
+ */
+export function toClinical(attrs: Record<string, string>): ClinicalRow | null {
+  if (!attrs.resourceFilePath || !attrs.identifier) return null;
+  return {
+    resource_type: attrs.type ?? "Unknown",
+    received_date: attrs.receivedDate ? (toIso(attrs.receivedDate) ?? attrs.receivedDate) : null,
+    source: attrs.sourceName ?? null,
+    file: attrs.resourceFilePath,
+    identifier: attrs.identifier,
+  };
+}
 
 export type DailyRow = {
   date: string;

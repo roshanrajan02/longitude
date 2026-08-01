@@ -315,3 +315,67 @@ export async function importEcgs(
   work(names);
   return { files, added };
 }
+
+// ---------------------------------------------------------------------------
+// Clinical records from the export
+// ---------------------------------------------------------------------------
+
+/**
+ * Clinical records Apple has collected from linked providers.
+ *
+ * This is the cross-provider route, and it is worth being clear about why it
+ * exists alongside the Epic poller. Epic is not one system: every health system
+ * runs its own instance behind its own login, so connecting directly gets you
+ * one hospital's records per connection. Apple Health Records aggregates across
+ * providers — including non-Epic ones — into HealthKit, and an export then
+ * carries all of them.
+ *
+ * The export references each resource by file path rather than inlining it, so
+ * the JSON is read from disk here rather than parsed out of export.xml.
+ */
+export async function importClinical(
+  db: Database,
+  exportDir: string,
+  records: { resource_type: string; received_date: string | null; source: string | null; file: string; identifier: string }[],
+): Promise<{ files: number; added: number; missing: number }> {
+  let files = 0;
+  let added = 0;
+  let missing = 0;
+
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO clinical (resource_type, received_date, source, fhir, dedupe_key)
+     VALUES (?, ?, ?, ?, ?)`,
+  );
+
+  const payloads: { row: (typeof records)[number]; fhir: string }[] = [];
+  for (const r of records) {
+    // Paths in the export are relative and start with a slash.
+    const path = join(exportDir, r.file.replace(/^\/+/, ""));
+    try {
+      payloads.push({ row: r, fhir: await Bun.file(path).text() });
+      files++;
+    } catch {
+      // A referenced file that is not in the archive. Counted rather than
+      // thrown: one missing resource must not lose the rest of the record.
+      missing++;
+    }
+  }
+
+  const work = db.transaction((batch: typeof payloads) => {
+    for (const { row, fhir } of batch) {
+      const res = insert.run(
+        row.resource_type,
+        row.received_date,
+        row.source,
+        fhir,
+        // The identifier is Apple's stable id for the resource, which survives
+        // re-export — unlike the file path, which does not.
+        dedupeKey(["apple", row.resource_type, row.identifier]),
+      );
+      if (res.changes > 0) added++;
+    }
+  });
+
+  work(payloads);
+  return { files, added, missing };
+}

@@ -2,10 +2,12 @@ import type { Database } from "bun:sqlite";
 import {
   isSleep,
   scanChunk,
+  toClinical,
   toDaily,
   toSample,
   toSleep,
   toWorkout,
+  type ClinicalRow,
   type DailyRow,
   type SampleRow,
   type SleepRow,
@@ -57,6 +59,8 @@ export type ImportResult = ImportProgress & {
   ms: number;
   importId: number;
   types: Record<string, number>;
+  /** Referenced clinical resources, for the caller to load from disk. */
+  clinical: ClinicalRow[];
 };
 
 /** Prepared once and reused for every row — re-preparing per insert is the slow path. */
@@ -121,6 +125,9 @@ export async function importExport(
   const st = statements(db);
   const counts = { samples: 0, sleep: 0, workouts: 0, daily: 0, skipped: 0 };
   const types: Record<string, number> = {};
+  // Collected rather than inserted: each one names a JSON file that has to be
+  // read from the export directory, which the importer does not know about.
+  const clinical: ClinicalRow[] = [];
 
   /**
    * One transaction per batch.
@@ -200,7 +207,11 @@ export async function importExport(
     carry = rest;
 
     for (const el of elements) {
-      if (el.name === "Workout") {
+      if (el.name === "ClinicalRecord") {
+        const c = toClinical(el.attrs);
+        if (c) clinical.push(c);
+        else counts.skipped++;
+      } else if (el.name === "Workout") {
         const w = toWorkout(el.attrs);
         if (w) pending.workouts.push(w);
         else counts.skipped++;
@@ -236,7 +247,10 @@ export async function importExport(
   if (tail) {
     const { elements } = scanChunk(tail);
     for (const el of elements) {
-      if (el.name === "Workout") {
+      if (el.name === "ClinicalRecord") {
+        const c = toClinical(el.attrs);
+        if (c) clinical.push(c);
+      } else if (el.name === "Workout") {
         const w = toWorkout(el.attrs);
         if (w) pending.workouts.push(w);
       } else if (el.name === "ActivitySummary") {
@@ -262,5 +276,5 @@ export async function importExport(
 
   onProgress?.({ bytesRead, totalBytes, ...counts });
 
-  return { bytesRead, totalBytes, ...counts, ms, importId: importRow.id, types };
+  return { bytesRead, totalBytes, ...counts, ms, importId: importRow.id, types, clinical };
 }

@@ -156,3 +156,35 @@ CREATE TABLE IF NOT EXISTS ecg (
   dedupe_key     TEXT NOT NULL UNIQUE
 );
 CREATE INDEX IF NOT EXISTS ecg_time_idx ON ecg (recorded_at);
+
+-- ---------------------------------------------------------------------------
+-- providers — everywhere your records might be.
+--
+-- The hardest problem in a personal health record is not fetching the data, it
+-- is knowing where to fetch it from. Nobody remembers every clinic they have
+-- visited, and there is no registry of "places that hold records about me".
+--
+-- Two things fill this table. Insurance claims name every provider who billed
+-- for you, which is the closest thing to a definitive list and includes private
+-- practices. The CMS NPI registry then turns a name into an identity.
+--
+-- `fhir_base` is null until a provider is matched to a known endpoint. Null does
+-- not mean unreachable — it means no API was found, and the records are still
+-- obtainable by written request under HIPAA's right of access.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS providers (
+  id          INTEGER PRIMARY KEY,
+  npi         TEXT UNIQUE,
+  name        TEXT NOT NULL,
+  kind        TEXT,                       -- "organization" or "individual"
+  specialty   TEXT,
+  city        TEXT,
+  state       TEXT,
+  fhir_base   TEXT,                       -- null when no API is known
+  auth_base   TEXT,
+  status      TEXT NOT NULL DEFAULT 'known',  -- known | connectable | connected | manual
+  source      TEXT,                       -- how you learned about them
+  notes       TEXT,
+  added_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS providers_status_idx ON providers (status);

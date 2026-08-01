@@ -3,7 +3,8 @@ import { importExport } from "./import";
 import { serve } from "./serve";
 import { summary, recent, trend } from "./query";
 import { buildRows, sync, drain, PUBLISHED_METRICS } from "./sync";
-import { importEcgs, importRoutes } from "./assets";
+import { importClinical, importEcgs, importRoutes } from "./assets";
+import { addProvider, listProviders, matchEndpoints, searchNpi } from "./providers";
 import {
   authUrl,
   exchangeCode,
@@ -118,6 +119,16 @@ async function main() {
       }
       if (ecgs.files > 0) console.log(`  ecg       ${human(ecgs.added).padStart(9)}`);
 
+      // Present only once Health Records is linked to a provider. Silence when
+      // there are none is correct — most exports have none.
+      if (result.clinical.length > 0) {
+        const clin = await importClinical(db, exportDir, result.clinical);
+        console.log(
+          `  clinical  ${human(clin.added).padStart(9)}  (${clin.files} resources` +
+            `${clin.missing > 0 ? `, ${clin.missing} referenced but absent` : ""})`,
+        );
+      }
+
       console.log(`\n  done in ${(result.ms / 1000).toFixed(1)}s`);
       // The extracted copy is ~1 GB; leaving it behind would be rude.
       if (temp) require("node:fs").rmSync(temp, { recursive: true, force: true });
@@ -212,6 +223,100 @@ async function main() {
       console.log(
         `drained ${r.fetched} buffered samples: ${r.added} new, ${r.deleted} removed from the buffer`,
       );
+      db.close();
+      break;
+    }
+
+    case "providers": {
+      const db = connect(dbPath);
+      const sub = args[0];
+
+      if (sub === "find") {
+        const name = args.slice(1).filter((a) => !a.startsWith("--")).join(" ");
+        const rows = await searchNpi({ name, state: flag("state"), city: flag("city") });
+        if (rows.length === 0) {
+          console.log("no match in the NPI registry — try fewer words, or add --state");
+          db.close();
+          break;
+        }
+        for (const r of rows.slice(0, 15)) {
+          console.log(`  ${r.npi}  ${r.name.slice(0, 42).padEnd(44)} ${r.city ?? ""}, ${r.state ?? ""}`);
+          if (r.specialty) console.log(`${" ".repeat(14)}${r.specialty}`);
+        }
+        console.log(`\n  add one with: longitude providers add <npi>`);
+        db.close();
+        break;
+      }
+
+      if (sub === "add") {
+        const npi = args[1];
+        if (!npi) {
+          console.error("usage: longitude providers add <npi>");
+          process.exit(1);
+        }
+        const [found] = await searchNpi({ name: undefined, limit: 1 }).catch(() => []);
+        // Looked up by number directly rather than by name.
+        const res = await fetch(
+          `https://npiregistry.cms.hhs.gov/api/?version=2.1&number=${encodeURIComponent(npi)}`,
+        );
+        const data = (await res.json()) as { results?: unknown[] };
+        if (!data.results?.length) {
+          console.error(`no provider with NPI ${npi}`);
+          process.exit(1);
+        }
+        const r = data.results[0] as Record<string, any>;
+        const b = r.basic ?? {};
+        const addr = (r.addresses ?? [{}])[0];
+        const tax = (r.taxonomies ?? []).find((t: any) => t.primary) ?? (r.taxonomies ?? [])[0];
+        const added = addProvider(db, {
+          npi: r.number,
+          name: (b.organization_name ?? `${b.first_name ?? ""} ${b.last_name ?? ""}`).trim(),
+          kind: r.enumeration_type === "NPI-2" ? "organization" : "individual",
+          specialty: tax?.desc ?? null,
+          city: addr.city ?? null,
+          state: addr.state ?? null,
+          source: "npi",
+        });
+        console.log(added.added ? "added" : "already recorded");
+        db.close();
+        break;
+      }
+
+      if (sub === "match") {
+        const r = await matchEndpoints(db);
+        console.log(`checked ${r.checked}, matched ${r.matched} to a FHIR endpoint`);
+        if (r.checked > r.matched) {
+          console.log(
+            `\n  ${r.checked - r.matched} without an API. That is normal — most small` +
+              `\n  practices have none. Those records are still yours by law: send a` +
+              `\n  written request under HIPAA's right of access and they must respond` +
+              `\n  within 30 days.`,
+          );
+        }
+        db.close();
+        break;
+      }
+
+      const rows = listProviders(db);
+      if (rows.length === 0) {
+        console.log(`No providers recorded yet.
+
+  The problem this solves: nobody remembers every clinic they have been to.
+
+  Most complete source is your insurer — every provider who billed for you,
+  private practices included. Then:
+
+    longitude providers find "austin regional" --state TX
+    longitude providers add <npi>
+    longitude providers match      cross-reference against known FHIR endpoints`);
+        db.close();
+        break;
+      }
+      for (const r of rows) {
+        const mark = r.fhir_base ? "API" : "  —";
+        console.log(`  ${mark}  ${r.name.slice(0, 40).padEnd(42)} ${r.city ?? ""} ${r.state ?? ""}`);
+      }
+      console.log(`\n  ${rows.filter((r) => r.fhir_base).length} of ${rows.length} have a known API`);
       db.close();
       break;
     }
@@ -364,6 +469,7 @@ longitude epic status   what is connected and stored
   longitude trend [type]          daily averages as a chart
   longitude sync [--dry-run]      publish daily aggregates to the site
   longitude drain                 pull watch samples from the site into SQLite
+  longitude providers             work out where your records are
   longitude epic <login|pull>     clinical records from your provider
   longitude serve                 ingest API + live stream
 
