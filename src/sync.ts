@@ -33,6 +33,10 @@ export const PUBLISHED_METRICS: { metric: string; source: string; unit: string }
   { metric: "respiratory_rate", source: "samples", unit: "breaths/min" },
   { metric: "sleep_hours", source: "sleep", unit: "hours" },
   { metric: "workout_minutes", source: "workouts", unit: "min" },
+  // From the GPX routes, which is the only place distance and climb exist —
+  // newer exports moved them out of the Workout element entirely.
+  { metric: "distance_km", source: "routes_distance", unit: "km" },
+  { metric: "elevation_gain_m", source: "routes_climb", unit: "m" },
 ];
 
 /**
@@ -113,6 +117,22 @@ export function buildRows(db: Database, days: number): SyncRow[] {
              FROM sleep
             WHERE stage IN ('core','deep','rem','asleep')
               AND start_time >= date('now', ?)
+            GROUP BY day`,
+        )
+        .all(since) as { day: string; avg: number; n: number }[];
+
+      for (const r of result) {
+        rows.push({ day: r.day, metric, avg: r.avg, min: null, max: null, n: r.n, unit });
+      }
+    }
+
+    if (source === "routes_distance" || source === "routes_climb") {
+      const col = source === "routes_distance" ? "distance_km" : "elevation_gain_m";
+      const result = db
+        .prepare(
+          `SELECT date(start_time) AS day, SUM(${col}) AS avg, COUNT(*) AS n
+             FROM routes
+            WHERE start_time >= date('now', ?)
             GROUP BY day`,
         )
         .all(since) as { day: string; avg: number; n: number }[];

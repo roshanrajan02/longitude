@@ -106,3 +106,53 @@ CREATE TABLE IF NOT EXISTS imports (
   rows_skipped  INTEGER DEFAULT 0,        -- duplicates from an overlapping export
   notes         TEXT
 );
+
+-- ---------------------------------------------------------------------------
+-- routes — GPS tracks from outdoor workouts.
+--
+-- Stored as computed aggregates rather than as points. A single route is
+-- thousands of samples at 1 Hz and 122 of them is millions of rows, to answer
+-- questions ("how far, how much climb") that are three numbers. The GPX files
+-- stay on disk; `file` says which one, so a map can be drawn later without
+-- having put a coordinate stream in the database first.
+--
+-- Deliberately not linked by foreign key to `workouts`. Route files are matched
+-- to workouts by overlapping time, which is a heuristic — it can miss, and a
+-- constraint would turn a near-miss into a failed import.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS routes (
+  id               INTEGER PRIMARY KEY,
+  workout_id       INTEGER,
+  start_time       TEXT NOT NULL,
+  end_time         TEXT,
+  distance_km      REAL,
+  elevation_gain_m REAL,
+  point_count      INTEGER,
+  file             TEXT,
+  dedupe_key       TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS routes_time_idx ON routes (start_time);
+
+-- ---------------------------------------------------------------------------
+-- ecg — single-lead electrocardiograms from the watch.
+--
+-- The classification is the point: "Sinus Rhythm", "Atrial Fibrillation",
+-- "Inconclusive". That is a clinical finding and belongs in the record whether
+-- or not anything ever plots the waveform.
+--
+-- The waveform itself is ~15,000 microvolt readings per recording. Kept as JSON
+-- in one column rather than 15,000 rows, because nothing queries an individual
+-- reading — it is drawn as a whole or not at all.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ecg (
+  id             INTEGER PRIMARY KEY,
+  recorded_at    TEXT NOT NULL,
+  classification TEXT,
+  symptoms       TEXT,
+  device         TEXT,
+  sample_rate_hz REAL,
+  duration_s     REAL,
+  waveform       TEXT,
+  dedupe_key     TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS ecg_time_idx ON ecg (recorded_at);

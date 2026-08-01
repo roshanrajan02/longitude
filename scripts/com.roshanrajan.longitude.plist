@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Nightly publish for Longitude.
+
+  05:10 local, just after the desk collectors at 04:45, so the health panels are
+  current by the time the checklist is opened. launchd runs a missed job on wake,
+  so a closed laptop delays this rather than skipping it.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.roshanrajan.longitude</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/roshanrajan/Learning/longitude/scripts/nightly.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/roshanrajan/Learning/longitude</string>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>5</integer><key>Minute</key><integer>10</integer></dict>
+  <key>StandardOutPath</key><string>/Users/roshanrajan/Library/Logs/longitude.log</string>
+  <key>StandardErrorPath</key><string>/Users/roshanrajan/Library/Logs/longitude.log</string>
+  <key>RunAtLoad</key><false/>
+</dict>
+</plist>

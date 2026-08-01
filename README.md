@@ -5,9 +5,10 @@ ever seen — and nothing holds the longitudinal view. Longitude unifies Apple
 Health and Epic clinical records into one store and streams it to a live
 dashboard.
 
-**Status: the batch path works end to end.** An Apple Health export imports into
-SQLite and publishes daily aggregates to a dashboard. The live watch path is not
-built — see Components below.
+**Status: everything except the watch app.** An export — including its GPS routes
+and ECGs — imports into SQLite and publishes daily aggregates to a dashboard.
+Clinical records pull from Epic over SMART on FHIR. The watchOS app is the one
+remaining piece, and it needs a paid Apple Developer account.
 
 ## The architecture, and why it looks like this
 
@@ -64,9 +65,10 @@ since clinical data changes weekly at most, polling costs nothing.
 | `src/import.ts` — export → SQLite | TypeScript (Bun) | done |
 | `src/query.ts` — aggregates | TypeScript (Bun) | done, 10 tests |
 | `src/sync.ts` — publish to the dashboard | TypeScript (Bun) | done |
+| `src/assets.ts` — GPX routes, ECG CSVs | TypeScript (Bun) | done, 20 tests |
+| `src/epic.ts` — SMART on FHIR poller | TypeScript (Bun) | done, needs a client id |
 | `src/serve.ts` — ingest API + SSE | TypeScript (Bun) | done, untested against a device |
-| `ios/` — HealthKit reader, workout session | Swift | not started |
-| `epic/` — FHIR patient-access poller | TypeScript | not started |
+| `ios/` — HealthKit reader, workout session | Swift | **not started — needs the Apple Developer account** |
 
 ## Usage
 
@@ -77,7 +79,41 @@ bun run src/cli.ts trend heart_rate --days 30
 bun run src/cli.ts sync --dry-run      # what would be published
 DATABASE_URL=… bun run src/cli.ts sync # publish it
 bun run src/cli.ts serve               # ingest API for the watch app
+
+bun run src/cli.ts epic login          # connect to your provider
+bun run src/cli.ts epic pull           # fetch clinical records
 ```
+
+`import` takes the zip Apple gives you directly, and pulls the GPS routes and
+ECGs that sit alongside `export.xml` — neither is referenced inside it, so an
+importer reading only that file silently discards both.
+
+## Connecting Epic
+
+One-time setup, all free:
+
+1. Register a patient-facing app at <https://fhir.epic.com>
+2. Set its redirect URI to `http://localhost:4000/epic/callback`
+3. `export EPIC_CLIENT_ID=<client id>` and, for a real provider,
+   `EPIC_FHIR_BASE` / `EPIC_AUTH_BASE`
+4. `bun run src/cli.ts epic login`
+
+PKCE, not a client secret — this runs on your laptop, so anything compiled into
+it is not secret, which is the case PKCE exists for.
+
+## Nightly
+
+`scripts/com.roshanrajan.longitude.plist` republishes aggregates and pulls Epic
+at 05:10 local. Credentials come from `~/.longitude/env`, so none are written
+into the script or the plist.
+
+```
+cp scripts/com.roshanrajan.longitude.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.roshanrajan.longitude.plist
+```
+
+The import stays manual, because Apple gives no way to trigger an export from a
+Mac.
 
 Measured against a real export: 839 MB, 1,970,457 records, imported in 28.7
 seconds with every record reconciled against the source file.

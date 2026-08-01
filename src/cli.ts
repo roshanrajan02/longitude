@@ -3,6 +3,19 @@ import { importExport } from "./import";
 import { serve } from "./serve";
 import { summary, recent, trend } from "./query";
 import { buildRows, sync, PUBLISHED_METRICS } from "./sync";
+import { importEcgs, importRoutes } from "./assets";
+import {
+  authUrl,
+  exchangeCode,
+  loadToken,
+  pkce,
+  poll,
+  saveToken,
+  RESOURCES,
+  SANDBOX_AUTH,
+  SANDBOX_BASE,
+} from "./epic";
+import { dirname } from "node:path";
 
 /**
  * The command line.
@@ -37,11 +50,35 @@ async function main() {
       }
 
       const db = connect(dbPath);
-      console.log(`importing ${file}`);
+
+      /**
+       * Accept the zip Apple actually hands you.
+       *
+       * The Health app produces `export.zip`; unzipping it first is a step that
+       * exists only because the importer could not read one. Extracted to a temp
+       * directory rather than streamed, because the routes and ECGs sit beside
+       * export.xml inside the archive and are needed too.
+       */
+      let source = file;
+      let temp: string | null = null;
+      if (file.toLowerCase().endsWith(".zip")) {
+        temp = `${require("node:os").tmpdir()}/longitude-${Date.now()}`;
+        console.log(`unzipping ${file}…`);
+        const unzip = Bun.spawnSync(["unzip", "-q", "-o", file, "-d", temp]);
+        if (unzip.exitCode !== 0) {
+          console.error(`could not unzip: ${new TextDecoder().decode(unzip.stderr)}`);
+          process.exit(1);
+        }
+        // Apple nests everything under apple_health_export/.
+        const nested = `${temp}/apple_health_export/export.xml`;
+        source = (await Bun.file(nested).exists()) ? nested : `${temp}/export.xml`;
+      }
+
+      console.log(`importing ${source}`);
       console.log(`      into ${dbPath}\n`);
 
       let lastLine = 0;
-      const result = await importExport(db, file, (p) => {
+      const result = await importExport(db, source, (p) => {
         // Throttled: writing a progress line per batch is itself measurable at
         // two million rows.
         const now = Date.now();
@@ -61,7 +98,27 @@ async function main() {
       console.log(`  workouts  ${human(result.workouts).padStart(9)}`);
       console.log(`  daily     ${human(result.daily).padStart(9)}`);
       console.log(`  duplicates skipped ${human(result.skipped)}`);
+
+      /**
+       * The rest of the export directory.
+       *
+       * GPX routes and ECG CSVs sit beside export.xml and are referenced nowhere
+       * inside it, so importing only that file quietly discards every outdoor
+       * route and every cardiac recording.
+       */
+      const exportDir = dirname(source);
+      const routes = await importRoutes(db, `${exportDir}/workout-routes`);
+      const ecgs = await importEcgs(db, `${exportDir}/electrocardiograms`);
+      if (routes.files > 0) {
+        console.log(
+          `  routes    ${human(routes.added).padStart(9)}  (${routes.linked} gave a workout its distance)`,
+        );
+      }
+      if (ecgs.files > 0) console.log(`  ecg       ${human(ecgs.added).padStart(9)}`);
+
       console.log(`\n  done in ${(result.ms / 1000).toFixed(1)}s`);
+      // The extracted copy is ~1 GB; leaving it behind would be rude.
+      if (temp) require("node:fs").rmSync(temp, { recursive: true, force: true });
       db.close();
       break;
     }
@@ -140,6 +197,115 @@ async function main() {
       break;
     }
 
+    case "epic": {
+      const sub = args[0];
+      const db = connect(dbPath);
+      const fhirBase = process.env.EPIC_FHIR_BASE ?? SANDBOX_BASE;
+      const authBase = process.env.EPIC_AUTH_BASE ?? SANDBOX_AUTH;
+      const clientId = process.env.EPIC_CLIENT_ID;
+      const redirectUri = "http://localhost:4000/epic/callback";
+
+      if (sub === "login") {
+        if (!clientId) {
+          console.error(
+            "EPIC_CLIENT_ID is unset.\n\n" +
+              "  1. Register a patient-facing app at https://fhir.epic.com\n" +
+              `  2. Set its redirect URI to ${redirectUri}\n` +
+              "  3. export EPIC_CLIENT_ID=<the client id>",
+          );
+          process.exit(1);
+        }
+
+        const { verifier, challenge } = pkce();
+        const state = Math.random().toString(36).slice(2);
+        const url = authUrl({ authBase, clientId, redirectUri, challenge, state, aud: fhirBase });
+
+        /**
+         * A one-shot server for the redirect.
+         *
+         * The alternative is asking you to copy a code out of a URL bar, which
+         * works and is unpleasant. This listens, takes the code, and stops.
+         */
+        const done = Promise.withResolvers<string>();
+        const server = Bun.serve({
+          port: 4000,
+          hostname: "127.0.0.1",
+          fetch(req) {
+            const u = new URL(req.url);
+            if (u.pathname !== "/epic/callback") return new Response("", { status: 404 });
+            if (u.searchParams.get("state") !== state) {
+              return new Response("state mismatch", { status: 400 });
+            }
+            const code = u.searchParams.get("code");
+            if (!code) return new Response("no code", { status: 400 });
+            done.resolve(code);
+            return new Response(
+              "<h3>Connected.</h3><p>You can close this tab and return to the terminal.</p>",
+              { headers: { "content-type": "text/html" } },
+            );
+          },
+        });
+
+        console.log("opening your provider's login page…\n");
+        console.log(`  if it does not open: ${url}\n`);
+        Bun.spawn(["open", url]);
+
+        const code = await done.promise;
+        server.stop();
+
+        const token = await exchangeCode({ authBase, clientId, redirectUri, code, verifier });
+        saveToken(db, fhirBase, token);
+        console.log(`connected. patient ${token.patient ?? "(none returned)"}`);
+        db.close();
+        break;
+      }
+
+      if (sub === "pull") {
+        if (!clientId) {
+          console.error("EPIC_CLIENT_ID is unset.");
+          process.exit(1);
+        }
+        const r = await poll(db, { fhirBase, authBase, clientId });
+        for (const [type, v] of Object.entries(r.byType)) {
+          console.log(`  ${type.padEnd(20)} ${String(v.fetched).padStart(5)} fetched  ${v.added} new`);
+        }
+        console.log(`\n  ${r.total} resources, ${r.added} new`);
+        db.close();
+        break;
+      }
+
+      if (sub === "status") {
+        const token = loadToken(db, fhirBase);
+        const rows = db
+          .prepare(`SELECT resource_type t, COUNT(*) n FROM clinical GROUP BY t ORDER BY n DESC`)
+          .all() as { t: string; n: number }[];
+        console.log(`endpoint  ${fhirBase}`);
+        console.log(
+          `connected ${token ? `yes, patient ${token.patient ?? "?"}` : "no — run: longitude epic login"}`,
+        );
+        if (rows.length) {
+          console.log("\nstored:");
+          for (const r of rows) console.log(`  ${String(r.n).padStart(5)}  ${r.t}`);
+        } else {
+          console.log("\nnothing pulled yet");
+        }
+        db.close();
+        break;
+      }
+
+      console.log(`longitude epic login    connect to your provider
+longitude epic pull     fetch clinical records
+longitude epic status   what is connected and stored
+
+  Resources pulled: ${RESOURCES.map((r) => r.type).join(", ")}
+
+  EPIC_CLIENT_ID   from https://fhir.epic.com
+  EPIC_FHIR_BASE   your provider's FHIR base (defaults to Epic's sandbox)
+  EPIC_AUTH_BASE   your provider's OAuth base`);
+      db.close();
+      break;
+    }
+
     case "serve": {
       const port = Number(flag("port") ?? 4000);
       serve({ dbPath, port });
@@ -153,6 +319,7 @@ async function main() {
   longitude stats                 what's in the database
   longitude trend [type]          daily averages as a chart
   longitude sync [--dry-run]      publish daily aggregates to the site
+  longitude epic <login|pull>     clinical records from your provider
   longitude serve                 ingest API + live stream
 
   --db <path>    database file (default ${DEFAULT_DB})
