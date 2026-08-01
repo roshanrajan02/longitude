@@ -6,6 +6,8 @@ import { buildRows, sync, drain, PUBLISHED_METRICS } from "./sync";
 import { importClinical, importEcgs, importRoutes } from "./assets";
 import { addProvider, listProviders, matchEndpoints, searchNpi } from "./providers";
 import { timeline, type EventKind } from "./timeline";
+import { documentStats, ingestDirectory, ingestFile, searchDocuments } from "./documents";
+import { SOURCES, GROUPS as CATALOG_GROUPS, formatsNeeded } from "./catalog";
 import { PAYERS, PAYER_RESOURCES, recordProviders } from "./claims";
 import {
   authUrl,
@@ -227,6 +229,119 @@ async function main() {
         `drained ${r.fetched} buffered samples: ${r.added} new, ${r.deleted} removed from the buffer`,
       );
       db.close();
+      break;
+    }
+
+    case "docs": {
+      const db = connect(dbPath);
+      const sub = args[0];
+
+      if (sub === "add") {
+        const target = args[1];
+        if (!target) {
+          console.error("usage: longitude docs add <file-or-directory> [--from 'Austin Regional Clinic']");
+          process.exit(1);
+        }
+        const custodian = flag("from");
+        const isDir = require("node:fs").statSync(target).isDirectory();
+
+        if (isDir) {
+          const r = await ingestDirectory(db, target, { dbPath, custodian });
+          console.log(`  ${r.files} files → ${r.added} added, ${r.duplicates} already held`);
+          if (r.unreadable > 0) {
+            console.log(`  ${r.unreadable} stored but not readable — see: longitude docs stats`);
+          }
+        } else {
+          const r = await ingestFile(db, target, { dbPath, custodian });
+          if (r.duplicate) console.log(`  already held: ${r.title}`);
+          else {
+            console.log(`  ${r.format.padEnd(6)} ${r.title}`);
+            console.log(`  ${r.chars.toLocaleString()} characters extracted`);
+            if (r.problem) console.log(`  note: ${r.problem}`);
+          }
+        }
+        db.close();
+        break;
+      }
+
+      if (sub === "search") {
+        const q = args.slice(1).join(" ");
+        if (!q) {
+          console.error('usage: longitude docs search "creatinine"');
+          process.exit(1);
+        }
+        const hits = searchDocuments(db, q);
+        if (hits.length === 0) {
+          console.log(`nothing matching "${q}"`);
+          db.close();
+          break;
+        }
+        for (const h of hits) {
+          console.log(`  ${(h.doc_date ?? "unknown").padEnd(11)} ${h.title.slice(0, 54)}`);
+          console.log(`              ${h.snippet.replace(/\s+/g, " ").slice(0, 96)}`);
+        }
+        db.close();
+        break;
+      }
+
+      if (sub === "stats") {
+        const s = documentStats(db);
+        if (s.byFormat.length === 0) {
+          console.log("no documents held yet — longitude docs add <file>");
+          db.close();
+          break;
+        }
+        console.log("held:");
+        for (const f of s.byFormat) {
+          const mb = (f.bytes / 1e6).toFixed(1);
+          console.log(
+            `  ${String(f.n).padStart(5)}  ${f.format.padEnd(7)} ${mb.padStart(7)} MB` +
+              (f.unreadable > 0 ? `   ${f.unreadable} unreadable` : ""),
+          );
+        }
+        if (s.problems.length > 0) {
+          console.log("\nheld but not readable:");
+          for (const p of s.problems) console.log(`  ${String(p.n).padStart(5)}  ${p.extract_note}`);
+          console.log("\n  The originals are kept. Extraction improves; a re-request does not.");
+        }
+        db.close();
+        break;
+      }
+
+      console.log(`longitude docs add <path>       take in a file or a whole directory
+longitude docs search <query>   full-text over everything extracted
+longitude docs stats            what is held, and what could not be read
+
+  Reads PDF, C-CDA, DICOM, RTF, HTML, CSV and plain text. Format is sniffed
+  from the bytes, not the extension. Originals are never discarded.`);
+      db.close();
+      break;
+    }
+
+    case "sources": {
+      const wantGroup = args[0];
+      if (wantGroup === "formats") {
+        console.log("formats the infrastructure must read:\n");
+        for (const f of formatsNeeded()) {
+          console.log(`  ${String(f.sources.length).padStart(2)}×  ${f.format}`);
+        }
+        break;
+      }
+
+      console.log(`${SOURCES.length} retrievable sources of your medical record.\n`);
+      for (const g of CATALOG_GROUPS) {
+        console.log(`${g.label.toUpperCase()}  — ${g.why}\n`);
+        for (const key of g.keys) {
+          const s = SOURCES.find((x) => x.key === key);
+          if (!s) continue;
+          const badge = s.access === "api" ? "API" : s.access === "portal" ? "web" : s.access === "request" ? "ask" : "phys";
+          const cost = s.cost === "free" ? "" : ` (${s.cost})`;
+          console.log(`  ${badge}  ${s.data}${cost}`);
+          console.log(`       ${s.custodian} · ${s.formats.join(", ")}`);
+          if (s.where) console.log(`       ${s.where}`);
+          console.log(`       ${s.note}\n`);
+        }
+      }
       break;
     }
 
@@ -612,6 +727,8 @@ longitude epic status   what is connected and stored
   longitude trend [type]          daily averages as a chart
   longitude sync [--dry-run]      publish daily aggregates to the site
   longitude drain                 pull watch samples from the site into SQLite
+  longitude sources               what is retrievable, and how
+  longitude docs <add|search>     take in PDFs, C-CDAs, DICOM, notes
   longitude payer <login|pull>    claims from your insurer = who you have seen
   longitude timeline              your medical history, in order
   longitude providers             work out where your records are

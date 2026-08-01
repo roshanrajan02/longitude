@@ -188,3 +188,48 @@ CREATE TABLE IF NOT EXISTS providers (
   added_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS providers_status_idx ON providers (status);
+
+-- ---------------------------------------------------------------------------
+-- documents — everything that is not structured data.
+--
+-- Twelve of the twenty-one retrievable sources arrive as PDF. Four arrive as
+-- FHIR. An infrastructure built only for FHIR handles the minority of what
+-- actually exists, which is how a record ends up "complete" while missing every
+-- visit note, every radiology report and every letter.
+--
+-- The original bytes are never discarded. Extraction is lossy and will improve;
+-- a scanned page that yields nothing today is a page that OCR reads next year,
+-- and re-requesting it from a hospital is a month of waiting.
+--
+-- `text` is null when nothing could be extracted, which is different from an
+-- empty document. A null here means "we hold bytes we cannot yet read" and is
+-- meant to be visible, not swallowed.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS documents (
+  id            INTEGER PRIMARY KEY,
+  kind          TEXT NOT NULL,          -- note, report, ccda, imaging, lab, letter
+  title         TEXT,
+  doc_date      TEXT,                   -- clinical date, not when it was filed
+  custodian     TEXT,                   -- who it came from
+  source        TEXT,                   -- catalog key, e.g. provider-notes
+  format        TEXT NOT NULL,          -- pdf, ccda, dicom, text, rtf, html
+  bytes         INTEGER,
+  /** Where the original lives. Kept on disk; the database stays portable. */
+  path          TEXT NOT NULL,
+  /** Extracted text, or null when extraction failed or is not yet possible. */
+  text          TEXT,
+  /** Why text is null, so the gap is actionable rather than mysterious. */
+  extract_note  TEXT,
+  /** Structured findings pulled out of the document, as JSON. */
+  meta          TEXT,
+  dedupe_key    TEXT NOT NULL UNIQUE,
+  added_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS documents_date_idx ON documents (doc_date);
+CREATE INDEX IF NOT EXISTS documents_kind_idx ON documents (kind);
+
+-- Full-text search over everything extracted, so a note from 2019 is findable
+-- by what it says rather than by remembering when it happened.
+CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+  title, text, content='documents', content_rowid='id'
+);
