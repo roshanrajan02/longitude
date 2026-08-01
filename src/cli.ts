@@ -447,7 +447,26 @@ record locator an individual has.
         }
         const { verifier, challenge } = pkce();
         const state = Math.random().toString(36).slice(2);
-        const url = authUrl({ authBase, clientId, redirectUri, challenge, state, aud: fhirBase });
+        /**
+         * Scopes and PKCE come from configuration, because the server decides.
+         *
+         * Cigna's registration lists `openid fhirUser patient/*.read` and its
+         * capabilities advertise a confidential client with no PKCE. Sending
+         * `offline_access` it did not grant, or a code challenge it does not
+         * expect, is how an authorization request is refused with an error that
+         * blames the client id.
+         */
+        const scope = process.env.PAYER_SCOPE;
+        const url = authUrl({
+          authBase,
+          clientId,
+          redirectUri,
+          challenge: discovered?.pkce === false ? "" : challenge,
+          state,
+          aud: fhirBase,
+          scope,
+          includeAud: process.env.PAYER_NO_AUD !== "1",
+        });
 
         console.log(`opening your insurer's member login…\n  ${url}\n`);
 
@@ -756,7 +775,26 @@ record locator an individual has.
 
         const { verifier, challenge } = pkce();
         const state = Math.random().toString(36).slice(2);
-        const url = authUrl({ authBase, clientId, redirectUri, challenge, state, aud: fhirBase });
+        /**
+         * Scopes and PKCE come from configuration, because the server decides.
+         *
+         * Cigna's registration lists `openid fhirUser patient/*.read` and its
+         * capabilities advertise a confidential client with no PKCE. Sending
+         * `offline_access` it did not grant, or a code challenge it does not
+         * expect, is how an authorization request is refused with an error that
+         * blames the client id.
+         */
+        const scope = process.env.PAYER_SCOPE;
+        const url = authUrl({
+          authBase,
+          clientId,
+          redirectUri,
+          challenge: discovered?.pkce === false ? "" : challenge,
+          state,
+          aud: fhirBase,
+          scope,
+          includeAud: process.env.PAYER_NO_AUD !== "1",
+        });
 
         /**
          * A one-shot server for the redirect.

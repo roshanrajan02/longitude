@@ -75,17 +75,37 @@ export function authUrl(opts: {
   state: string;
   /** Epic requires the FHIR base as an audience parameter. */
   aud: string;
+  /**
+   * Exactly the scopes the registration lists, and no more.
+   *
+   * The default asks for `offline_access`, which buys a refresh token and means
+   * connecting once rather than every hour. Cigna does not list it — their app
+   * registration says `openid fhirUser patient/*.read` — and servers routinely
+   * reject an authorization request containing a scope the client was not
+   * granted, with an error that names the client rather than the scope.
+   *
+   * So this is configurable rather than assumed. Asking for less than you want
+   * and succeeding beats asking for more and being refused.
+   */
+  scope?: string;
+  /** Some servers reject an unexpected `aud`; others require it. */
+  includeAud?: boolean;
 }): string {
   const p = new URLSearchParams({
     response_type: "code",
     client_id: opts.clientId,
     redirect_uri: opts.redirectUri,
-    scope: "openid fhirUser patient/*.read offline_access",
+    scope: opts.scope ?? "openid fhirUser patient/*.read offline_access",
     state: opts.state,
-    aud: opts.aud,
-    code_challenge: opts.challenge,
-    code_challenge_method: "S256",
   });
+  if (opts.includeAud !== false) p.set("aud", opts.aud);
+  // PKCE only where it is going to be honoured; a confidential client that
+  // sends a challenge the server ignores is harmless, but one that sends it to
+  // a server which validates it strictly and was not told to expect it is not.
+  if (opts.challenge) {
+    p.set("code_challenge", opts.challenge);
+    p.set("code_challenge_method", "S256");
+  }
   return `${opts.authBase}/authorize?${p}`;
 }
 
