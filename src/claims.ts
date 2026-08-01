@@ -159,3 +159,74 @@ export function recordProviders(
 
   return { claims: eobs.length, providers: found.size, added, earliest, latest };
 }
+
+// ---------------------------------------------------------------------------
+// Known payers
+// ---------------------------------------------------------------------------
+
+/**
+ * Patient Access endpoints for payers.
+ *
+ * These are the *sandbox* bases, which is what can be verified without an
+ * account. Production URLs are issued when an app is registered, and differ.
+ * They are listed anyway because they prove the endpoint exists and speaks R4,
+ * which is the question you actually have before spending an hour registering.
+ *
+ * Cigna and Aetna are here because both run Medicare Advantage and Medicaid
+ * lines, so both had to build a Patient Access API even though a commercial
+ * employer plan does not oblige them to expose one. In practice they usually
+ * serve commercial members from the same endpoint — worth confirming rather
+ * than assuming.
+ */
+export const PAYERS: {
+  key: string;
+  name: string;
+  portal: string;
+  sandboxFhir: string;
+  sandboxAuth: string;
+  note: string;
+}[] = [
+  {
+    key: "cigna",
+    name: "Cigna",
+    portal: "https://developer.cigna.com",
+    sandboxFhir: "https://p-hi2.digitaledge.cigna.com/PatientAccess/v1-devportal",
+    sandboxAuth: "https://r-hi2.cigna.com/mga/sps/oauth/oauth20",
+    note: "Exposes clinical resources as well as claims — conditions, encounters, immunizations.",
+  },
+  {
+    key: "aetna",
+    name: "Aetna (CVS Health)",
+    portal: "https://developerportal.aetna.com",
+    sandboxFhir: "https://vteapif1.aetna.com/fhirdemo/v1/patientaccess",
+    sandboxAuth: "https://vteapif1.aetna.com/fhirdemo/v1/fhirserver_auth/oauth2",
+    note: "Claims plus conditions, procedures, medications and the practitioners behind them.",
+  },
+  {
+    key: "cms",
+    name: "Medicare (CMS Blue Button 2.0)",
+    portal: "https://bluebutton.cms.gov/developers/",
+    sandboxFhir: "https://sandbox.bluebutton.cms.gov/v2/fhir",
+    sandboxAuth: "https://sandbox.bluebutton.cms.gov/v2/o",
+    note: "Traditional Medicare only. Claims back to 2014, nothing clinical.",
+  },
+];
+
+/**
+ * Resources worth pulling from a payer.
+ *
+ * Claims first, because they are the record locator and the reason to connect at
+ * all. The clinical resources are a bonus that not every payer offers, and are
+ * requested individually so one unsupported type does not fail the run.
+ */
+export const PAYER_RESOURCES = [
+  { type: "ExplanationOfBenefit", note: "claims — every provider who billed" },
+  { type: "Coverage", note: "which plan, and when" },
+  { type: "Condition", note: "diagnoses the payer knows about" },
+  { type: "Procedure", note: "procedures billed" },
+  { type: "MedicationRequest", note: "prescriptions" },
+  { type: "Observation", note: "results the payer holds" },
+  { type: "Immunization", note: "vaccinations" },
+  { type: "AllergyIntolerance", note: "allergies" },
+  { type: "Encounter", note: "visits" },
+] as const;

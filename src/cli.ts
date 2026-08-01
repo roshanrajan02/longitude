@@ -6,6 +6,7 @@ import { buildRows, sync, drain, PUBLISHED_METRICS } from "./sync";
 import { importClinical, importEcgs, importRoutes } from "./assets";
 import { addProvider, listProviders, matchEndpoints, searchNpi } from "./providers";
 import { timeline, type EventKind } from "./timeline";
+import { PAYERS, PAYER_RESOURCES, recordProviders } from "./claims";
 import {
   authUrl,
   exchangeCode,
@@ -14,6 +15,7 @@ import {
   poll,
   saveToken,
   RESOURCES,
+  storeResources,
   findProviders,
   authBaseFor,
   SANDBOX_AUTH,
@@ -226,6 +228,111 @@ async function main() {
       );
       db.close();
       break;
+    }
+
+    case "payer": {
+      const db = connect(dbPath);
+      const sub = args[0];
+
+      if (!sub || sub === "list") {
+        console.log(`Insurers expose claims over FHIR. Claims name every provider who
+billed for you -- including private practice -- which makes them the best
+record locator an individual has.
+
+`);
+        for (const p of PAYERS) {
+          console.log(`  ${p.name}`);
+          console.log(`    register at ${p.portal}`);
+          console.log(`    ${p.note}\n`);
+        }
+        console.log(`  Pulls: ${PAYER_RESOURCES.map((r) => r.type).join(", ")}\n`);
+        console.log(`  Once registered:
+    export PAYER_CLIENT_ID=<client id>
+    export PAYER_FHIR_BASE=<from the portal>
+    export PAYER_AUTH_BASE=<from the portal>
+    longitude payer login
+    longitude payer pull`);
+        db.close();
+        break;
+      }
+
+      const clientId = process.env.PAYER_CLIENT_ID;
+      const fhirBase = process.env.PAYER_FHIR_BASE;
+      const authBase = process.env.PAYER_AUTH_BASE;
+      const redirectUri = "http://localhost:4000/epic/callback";
+
+      if (sub === "login") {
+        if (!clientId || !fhirBase || !authBase) {
+          console.error("PAYER_CLIENT_ID, PAYER_FHIR_BASE and PAYER_AUTH_BASE must be set.");
+          console.error("Run `longitude payer` for where to register.");
+          process.exit(1);
+        }
+        const { verifier, challenge } = pkce();
+        const state = Math.random().toString(36).slice(2);
+        const url = authUrl({ authBase, clientId, redirectUri, challenge, state, aud: fhirBase });
+
+        const done = Promise.withResolvers<string>();
+        const server = Bun.serve({
+          port: 4000,
+          hostname: "127.0.0.1",
+          fetch(req) {
+            const u = new URL(req.url);
+            if (u.searchParams.get("state") !== state) return new Response("state mismatch", { status: 400 });
+            const code = u.searchParams.get("code");
+            if (!code) return new Response("no code", { status: 400 });
+            done.resolve(code);
+            return new Response("<h3>Connected.</h3><p>Close this tab.</p>", {
+              headers: { "content-type": "text/html" },
+            });
+          },
+        });
+
+        console.log(`opening your insurer's member login…\n  ${url}\n`);
+        Bun.spawn(["open", url]);
+        const code = await done.promise;
+        server.stop();
+
+        const token = await exchangeCode({ authBase, clientId, redirectUri, code, verifier });
+        saveToken(db, fhirBase, token);
+        console.log(`connected. member ${token.patient ?? "(none returned)"}`);
+        db.close();
+        break;
+      }
+
+      if (sub === "pull") {
+        const token = loadToken(db, fhirBase ?? "");
+        if (!token?.patient) {
+          console.error("not connected — run: longitude payer login");
+          process.exit(1);
+        }
+
+        const eobs: Record<string, unknown>[] = [];
+        for (const r of PAYER_RESOURCES) {
+          try {
+            const got = await fetchAll(fhirBase!, token.access_token, r.type, token.patient);
+            console.log(`  ${r.type.padEnd(22)} ${String(got.length).padStart(5)}`);
+            if (r.type === "ExplanationOfBenefit") eobs.push(...got);
+            else storeResources(db, fhirBase!, got);
+          } catch (err) {
+            // Payers differ in what they expose; one 404 must not lose the rest.
+            console.log(`  ${r.type.padEnd(22)}     — ${String(err).slice(0, 44)}`);
+          }
+        }
+
+        if (eobs.length > 0) {
+          storeResources(db, fhirBase!, eobs);
+          const scan = recordProviders(db, eobs, "claims");
+          console.log(`\n  ${scan.claims} claims → ${scan.providers} distinct providers, ${scan.added} new`);
+          if (scan.earliest) console.log(`  covering ${scan.earliest.slice(0, 10)} to ${scan.latest?.slice(0, 10)}`);
+          console.log(`\n  longitude providers        see them`);
+          console.log(`  longitude providers match  find which have an API`);
+        }
+        db.close();
+        break;
+      }
+
+      console.error(`unknown: longitude payer ${sub}`);
+      process.exit(1);
     }
 
     case "timeline": {
@@ -505,6 +612,7 @@ longitude epic status   what is connected and stored
   longitude trend [type]          daily averages as a chart
   longitude sync [--dry-run]      publish daily aggregates to the site
   longitude drain                 pull watch samples from the site into SQLite
+  longitude payer <login|pull>    claims from your insurer = who you have seen
   longitude timeline              your medical history, in order
   longitude providers             work out where your records are
   longitude epic <login|pull>     clinical records from your provider
