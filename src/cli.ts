@@ -5,6 +5,7 @@ import { summary, recent, trend } from "./query";
 import { buildRows, sync, drain, PUBLISHED_METRICS } from "./sync";
 import { importClinical, importEcgs, importRoutes } from "./assets";
 import { addProvider, listProviders, matchEndpoints, searchNpi } from "./providers";
+import { timeline, type EventKind } from "./timeline";
 import {
   authUrl,
   exchangeCode,
@@ -223,6 +224,41 @@ async function main() {
       console.log(
         `drained ${r.fetched} buffered samples: ${r.added} new, ${r.deleted} removed from the buffer`,
       );
+      db.close();
+      break;
+    }
+
+    case "timeline": {
+      const db = connect(dbPath);
+      const kinds = flag("kind")?.split(",") as EventKind[] | undefined;
+      const events = timeline(db, { limit: Number(flag("limit") ?? 40), kinds, since: flag("since") });
+
+      if (events.length === 0) {
+        console.log("nothing on the timeline yet");
+        db.close();
+        break;
+      }
+
+      const MARK: Record<string, string> = {
+        clinical: "◆",
+        workout: "▲",
+        ecg: "♥",
+        device: "○",
+        gap: "·",
+        milestone: "★",
+      };
+
+      let year = "";
+      for (const e of events) {
+        const y = e.at.slice(0, 4);
+        if (y !== year) {
+          console.log(`\n${y}`);
+          year = y;
+        }
+        console.log(`  ${e.at.slice(5, 10)}  ${MARK[e.kind] ?? " "}  ${e.title.slice(0, 52)}`);
+        if (e.detail) console.log(`${" ".repeat(14)}${e.detail.slice(0, 60)}`);
+      }
+      console.log(`\n  ◆ clinical   ▲ workout   ♥ ecg   ○ device   · gap`);
       db.close();
       break;
     }
@@ -469,6 +505,7 @@ longitude epic status   what is connected and stored
   longitude trend [type]          daily averages as a chart
   longitude sync [--dry-run]      publish daily aggregates to the site
   longitude drain                 pull watch samples from the site into SQLite
+  longitude timeline              your medical history, in order
   longitude providers             work out where your records are
   longitude epic <login|pull>     clinical records from your provider
   longitude serve                 ingest API + live stream
