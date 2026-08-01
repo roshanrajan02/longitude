@@ -210,3 +210,107 @@ export async function sync(
     ms: Date.now() - started,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Draining the live buffer
+// ---------------------------------------------------------------------------
+
+export type DrainResult = { fetched: number; added: number; deleted: number };
+
+/**
+ * Pull what the watch posted to the website into the local archive.
+ *
+ * The direction is deliberate and worth stating, because it looks backwards. The
+ * laptop is asleep whenever you are out running, so it cannot be the thing the
+ * watch talks to — the website takes the writes and this collects them
+ * afterwards. SQLite remains the permanent, complete store; `health_live` is a
+ * buffer measured in days.
+ *
+ * Rows are deleted only after they are safely in SQLite, and only the exact ids
+ * that were inserted. A delete-by-timestamp would race with a watch that posted
+ * during the drain and silently discard those samples.
+ */
+export async function drain(
+  db: Database,
+  connectionString: string,
+  batch = 5_000,
+): Promise<DrainResult> {
+  /**
+   * Prefer a direct connection over the pooler for this one.
+   *
+   * Supabase's transaction pooler on 6543 reuses server connections between
+   * clients, so a statement prepared during one run is still registered when the
+   * next run prepares the same name — "prepared statement already exists", after
+   * the insert has succeeded and before the delete. The publish path is a single
+   * upsert and never trips it; a loop of identical reads does.
+   */
+  const sql = new SQL(connectionString);
+  let fetched = 0;
+  let added = 0;
+  let deleted = 0;
+
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO samples (type, value, unit, start_time, end_time, source, dedupe_key)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  try {
+    for (;;) {
+      const rows = (await sql`
+        SELECT id, type, value, unit, start_time, end_time, source, dedupe_key
+          FROM health_live
+         ORDER BY received_at
+         LIMIT ${batch}
+      `) as {
+        id: string;
+        type: string;
+        value: number | null;
+        unit: string | null;
+        start_time: Date;
+        end_time: Date | null;
+        source: string | null;
+        dedupe_key: string;
+      }[];
+
+      if (rows.length === 0) break;
+      fetched += rows.length;
+
+      const write = db.transaction((batchRows: typeof rows) => {
+        for (const r of batchRows) {
+          const res = insert.run(
+            r.type,
+            r.value,
+            r.unit,
+            new Date(r.start_time).toISOString(),
+            r.end_time ? new Date(r.end_time).toISOString() : null,
+            r.source,
+            r.dedupe_key,
+          );
+          if (res.changes > 0) added++;
+        }
+      });
+      write(rows);
+
+      /**
+       * By id, not by time.
+       *
+       * Deleting a window would take rows that arrived during the drain and
+       * were never read. The ids go through `sql()` rather than being
+       * interpolated directly — a bare JS array is serialised as a
+       * comma-joined string, which Postgres rejects as a malformed array
+       * literal after the insert has already succeeded.
+       */
+      const ids = rows.map((r) => r.id);
+      const gone = (await sql`
+        DELETE FROM health_live WHERE id IN ${sql(ids)} RETURNING id
+      `) as { id: string }[];
+      deleted += gone.length;
+
+      if (rows.length < batch) break;
+    }
+  } finally {
+    await sql.close();
+  }
+
+  return { fetched, added, deleted };
+}

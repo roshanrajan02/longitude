@@ -16,12 +16,27 @@ Health data arrives on three very different clocks. Pretending otherwise
 produces a dashboard that lies about how fresh it is.
 
 ```
-  Apple Watch ──┐
-                │  live: ~5s during workouts
-                ├──▶ watchOS/iOS app ──▶ ingest API ──▶ SQLite ──▶ SSE ──▶ site
-                │  ambient: ~4x/hour
-  Epic FHIR ────┘  polled every few hours
+  Apple Watch ──▶ watchOS app ──▶ site /api/health/ingest ──▶ live buffer
+                  live ~5s                                        │
+                  ambient ~15min                    dashboard reads it live
+                                                                  │
+  Epic FHIR ──────────────────────▶ SQLite on the laptop ◀── nightly drain
+                  polled                (permanent archive)
 ```
+
+### Why the watch posts to the site and not to the laptop
+
+The obvious design has the watch talk to a server on your Mac. It does not
+work, for a reason that only shows up in use: **the laptop is asleep whenever
+you are out running.** An ingest endpoint on localhost is reachable on your home
+network and nowhere else, which is the exact complement of when the interesting
+data is produced.
+
+So the site takes the writes — it is the only always-on part — and holds them in
+a buffer measured in days. The laptop drains that into SQLite, which stays the
+permanent, complete store. The tradeoff is deliberate and worth knowing: live
+workout samples sit in Postgres for up to 72 hours before being collected.
+Clinical records never leave the laptop at all.
 
 ### Why an iOS app is unavoidable
 

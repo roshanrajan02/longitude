@@ -25,10 +25,13 @@ fi
 
 stamp() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
-if [ -n "${DATABASE_URL:-}" ]; then
-  echo "$(stamp) sync: $("$BUN" run src/cli.ts sync --days 120 2>&1 | tail -1)"
+if [ -n "${DATABASE_URL:-}${DIRECT_URL:-}" ]; then
+  # Drain first. Anything the watch posted becomes part of the archive before
+  # the aggregates are recomputed, so today's numbers include today's workout.
+  echo "$(stamp) drain: $("$BUN" run src/cli.ts drain 2>&1 | tail -1)"
+  echo "$(stamp) sync:  $("$BUN" run src/cli.ts sync --days 120 2>&1 | tail -1)"
 else
-  echo "$(stamp) sync: skipped, DATABASE_URL unset"
+  echo "$(stamp) skipped, no database URL"
 fi
 
 # Only when a provider is actually configured. Absence is the normal case until

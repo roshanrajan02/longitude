@@ -2,7 +2,7 @@ import { connect, DEFAULT_DB } from "./db";
 import { importExport } from "./import";
 import { serve } from "./serve";
 import { summary, recent, trend } from "./query";
-import { buildRows, sync, PUBLISHED_METRICS } from "./sync";
+import { buildRows, sync, drain, PUBLISHED_METRICS } from "./sync";
 import { importEcgs, importRoutes } from "./assets";
 import {
   authUrl,
@@ -197,6 +197,23 @@ async function main() {
       break;
     }
 
+    case "drain": {
+      const db = connect(dbPath);
+      // DIRECT_URL first — see the note in sync.ts about the pooler and
+      // prepared statements surviving between runs.
+      const conn = process.env.DIRECT_URL ?? process.env.DATABASE_URL;
+      if (!conn) {
+        console.error("DIRECT_URL or DATABASE_URL must be set.");
+        process.exit(1);
+      }
+      const r = await drain(db, conn);
+      console.log(
+        `drained ${r.fetched} buffered samples: ${r.added} new, ${r.deleted} removed from the buffer`,
+      );
+      db.close();
+      break;
+    }
+
     case "epic": {
       const sub = args[0];
       const db = connect(dbPath);
@@ -319,6 +336,7 @@ longitude epic status   what is connected and stored
   longitude stats                 what's in the database
   longitude trend [type]          daily averages as a chart
   longitude sync [--dry-run]      publish daily aggregates to the site
+  longitude drain                 pull watch samples from the site into SQLite
   longitude epic <login|pull>     clinical records from your provider
   longitude serve                 ingest API + live stream
 
