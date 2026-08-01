@@ -315,3 +315,57 @@ export async function poll(
 
   return { byType, total, added };
 }
+
+// ---------------------------------------------------------------------------
+// Finding your provider
+// ---------------------------------------------------------------------------
+
+/**
+ * Epic's directory of live FHIR endpoints.
+ *
+ * Public, unauthenticated, and machine-readable — a FHIR Bundle of ~480
+ * Endpoint resources, one per health system. Without it, connecting means
+ * hunting through a provider's patient portal for a base URL that is rarely
+ * documented anywhere a patient would look.
+ */
+export const ENDPOINT_DIRECTORY = "https://open.epic.com/Endpoints/R4";
+
+export type Provider = { name: string; fhirBase: string };
+
+export async function findProviders(query: string): Promise<Provider[]> {
+  const res = await fetch(ENDPOINT_DIRECTORY, {
+    headers: { accept: "application/json", "user-agent": "longitude/0.1" },
+    signal: AbortSignal.timeout(45_000),
+  });
+  if (!res.ok) throw new Error(`directory unavailable: ${res.status}`);
+
+  const bundle = (await res.json()) as {
+    entry?: { resource?: { name?: string; address?: string } }[];
+  };
+
+  const needle = query.trim().toLowerCase();
+  const out: Provider[] = [];
+
+  for (const e of bundle.entry ?? []) {
+    const name = e.resource?.name;
+    const address = e.resource?.address;
+    if (!name || !address) continue;
+    if (needle && !name.toLowerCase().includes(needle)) continue;
+    // Trailing slashes vary across the directory and would double up when a
+    // resource path is appended.
+    out.push({ name, fhirBase: address.replace(/\/+$/, "") });
+  }
+
+  return out;
+}
+
+/**
+ * The OAuth base for a provider, derived from its FHIR base.
+ *
+ * Epic's convention is `.../api/FHIR/R4` for data and `.../oauth2` alongside it.
+ * Derived rather than asked for, because a patient has no way to know it — and
+ * checked at login, where a wrong guess fails loudly rather than silently.
+ */
+export function authBaseFor(fhirBase: string): string {
+  return fhirBase.replace(/\/api\/FHIR\/(R4|DSTU2|STU3)\/?$/i, "/oauth2");
+}

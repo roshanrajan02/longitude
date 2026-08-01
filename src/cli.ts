@@ -12,6 +12,8 @@ import {
   poll,
   saveToken,
   RESOURCES,
+  findProviders,
+  authBaseFor,
   SANDBOX_AUTH,
   SANDBOX_BASE,
 } from "./epic";
@@ -291,6 +293,30 @@ async function main() {
         break;
       }
 
+      if (sub === "find") {
+        const query = args.slice(1).join(" ");
+        if (!query) {
+          console.error('usage: longitude epic find "kaiser"');
+          process.exit(1);
+        }
+        const found = await findProviders(query);
+        if (found.length === 0) {
+          console.log(`no Epic provider matching "${query}"`);
+          console.log("Try a shorter search — the directory uses official names.");
+          db.close();
+          break;
+        }
+        console.log(`${found.length} match${found.length === 1 ? "" : "es"}:\n`);
+        for (const p of found.slice(0, 25)) {
+          console.log(`  ${p.name}`);
+          console.log(`    EPIC_FHIR_BASE=${p.fhirBase}`);
+          console.log(`    EPIC_AUTH_BASE=${authBaseFor(p.fhirBase)}\n`);
+        }
+        if (found.length > 25) console.log(`  …and ${found.length - 25} more`);
+        db.close();
+        break;
+      }
+
       if (sub === "status") {
         const token = loadToken(db, fhirBase);
         const rows = db
@@ -310,7 +336,8 @@ async function main() {
         break;
       }
 
-      console.log(`longitude epic login    connect to your provider
+      console.log(`longitude epic find <q>  search Epic's directory for your provider
+longitude epic login    connect to your provider
 longitude epic pull     fetch clinical records
 longitude epic status   what is connected and stored
 

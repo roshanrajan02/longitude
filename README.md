@@ -105,13 +105,35 @@ importer reading only that file silently discards both.
 
 ## Connecting Epic
 
+Apple will not give you this. An export contains `ClinicalRecord` elements only
+if Health Records is linked to a provider, and even then it is a snapshot rather
+than something that keeps up. This talks to the health system directly, as you.
+
 One-time setup, all free:
 
-1. Register a patient-facing app at <https://fhir.epic.com>
-2. Set its redirect URI to `http://localhost:4000/epic/callback`
-3. `export EPIC_CLIENT_ID=<client id>` and, for a real provider,
-   `EPIC_FHIR_BASE` / `EPIC_AUTH_BASE`
-4. `bun run src/cli.ts epic login`
+1. **Find your provider.** Epic publishes ~480 live endpoints:
+
+   ```
+   bun run src/cli.ts epic find "kaiser"
+   ```
+
+   It prints the two environment variables for each match.
+
+2. **Register an app** at <https://fhir.epic.com> — patient-facing, no review for
+   the sandbox. Redirect URI `http://localhost:4000/epic/callback`.
+
+3. **Set the variables** and log in:
+
+   ```
+   export EPIC_CLIENT_ID=<client id>
+   export EPIC_FHIR_BASE=<from step 1>
+   export EPIC_AUTH_BASE=<from step 1>
+   bun run src/cli.ts epic login
+   ```
+
+Your browser opens your provider's normal patient login. Nothing here ever sees
+the password — the token comes back over a one-shot local redirect and is stored
+in the database.
 
 PKCE, not a client secret — this runs on your laptop, so anything compiled into
 it is not secret, which is the case PKCE exists for.
