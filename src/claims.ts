@@ -184,6 +184,7 @@ export const PAYERS: {
   portal: string;
   sandboxFhir: string;
   sandboxAuth: string;
+  prodFhir?: string;
   note: string;
 }[] = [
   {
@@ -192,6 +193,15 @@ export const PAYERS: {
     portal: "https://developer.cigna.com",
     sandboxFhir: "https://p-hi2.digitaledge.cigna.com/PatientAccess/v1-devportal",
     sandboxAuth: "https://r-hi2.cigna.com/mga/sps/oauth/oauth20",
+    /**
+     * Production, found by probing rather than from documentation.
+     *
+     * The portal does not list it and the developer site is a JavaScript
+     * application a script cannot read. Confirmed production by its OAuth host
+     * differing from the sandbox one — p-hi2 against r-hi2 — and by exposing
+     * MedicationDispense, which sandbox does not.
+     */
+    prodFhir: "https://fhir.cigna.com/PatientAccess/v1",
     note: "Exposes clinical resources as well as claims — conditions, encounters, immunizations.",
   },
   {
@@ -225,6 +235,10 @@ export const PAYER_RESOURCES = [
   { type: "Condition", note: "diagnoses the payer knows about" },
   { type: "Procedure", note: "procedures billed" },
   { type: "MedicationRequest", note: "prescriptions" },
+  // Production only. What was actually dispensed rather than what was written,
+  // which is the more truthful of the two — a prescription you never collected
+  // is not a medication you took.
+  { type: "MedicationDispense", note: "medications actually collected" },
   { type: "Observation", note: "results the payer holds" },
   { type: "Immunization", note: "vaccinations" },
   { type: "AllergyIntolerance", note: "allergies" },

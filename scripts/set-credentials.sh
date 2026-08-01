@@ -36,6 +36,16 @@ existing() {
 }
 
 CUR_BASE="$(existing PAYER_FHIR_BASE)"
+
+# Known production bases, so the common case is a keypress rather than a hunt
+# through a portal that may not list it. Cigna's is not documented anywhere a
+# patient would look; it was found by probing and confirmed by its OAuth host
+# differing from the sandbox one (p-hi2 rather than r-hi2).
+case "$PROFILE" in
+  cigna) SUGGESTED="https://fhir.cigna.com/PatientAccess/v1" ;;
+  aetna) SUGGESTED="https://vteapif1.aetna.com/fhirdemo/v1/patientaccess" ;;
+  *)     SUGGESTED="" ;;
+esac
 CUR_ID="$(existing PAYER_CLIENT_ID)"
 CUR_REDIRECT="$(existing PAYER_REDIRECT_URI)"
 
@@ -52,16 +62,21 @@ echo "Stored in:       $FILE"
 echo
 
 # --- FHIR base ---------------------------------------------------------------
-printf 'FHIR base URL%s: ' "$([ -n "$CUR_BASE" ] && echo " [$CUR_BASE]")"
+# Skippable. The base can be filled in later, and refusing to store a secret
+# until an unrelated field is known just means the secret gets pasted somewhere
+# worse in the meantime.
+DEFAULT_BASE="${CUR_BASE:-$SUGGESTED}"
+printf 'FHIR base URL%s\n  (Enter to accept, "-" to leave blank): ' \
+  "$([ -n "$DEFAULT_BASE" ] && echo " [$DEFAULT_BASE]")"
 read -r BASE
-BASE="${BASE:-$CUR_BASE}"
-if [ -z "$BASE" ]; then
-  echo "A FHIR base URL is required." >&2
-  exit 1
+if [ "$BASE" = "-" ]; then
+  BASE=""
+else
+  BASE="${BASE:-$DEFAULT_BASE}"
 fi
 # A trailing slash doubles up when a resource path is appended, and a trailing
 # period is what got the first redirect URI rejected. Strip both.
-BASE="$(printf '%s' "$BASE" | sed 's#[/.]*$##')"
+[ -n "$BASE" ] && BASE="$(printf '%s' "$BASE" | sed 's#[/.]*$##')"
 
 # --- client id ---------------------------------------------------------------
 printf 'Client ID%s: ' "$([ -n "$CUR_ID" ] && echo " [$CUR_ID]")"
@@ -113,7 +128,7 @@ chmod 600 "$FILE"
 
 echo
 echo "Written."
-echo "  base     $BASE"
+echo "  base     ${BASE:-(not set — add it before payer login)}"
 echo "  client   $CLIENT_ID"
 echo "  secret   $(fingerprint "$SECRET")"
 echo "  redirect $REDIRECT"
@@ -121,5 +136,9 @@ echo "  mode     $(stat -f '%Lp' "$FILE")"
 echo
 echo "Next:"
 echo "  source $FILE"
-echo "  bun run src/cli.ts payer check"
-echo "  bun run src/cli.ts payer login"
+if [ -z "$BASE" ]; then
+  echo "  # then re-run this script to add the FHIR base when you have it"
+else
+  echo "  bun run src/cli.ts payer check"
+  echo "  bun run src/cli.ts payer login"
+fi
