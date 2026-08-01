@@ -103,17 +103,41 @@ export async function exchangeCode(opts: {
   redirectUri: string;
   code: string;
   verifier: string;
+  /**
+   * Set for a confidential client.
+   *
+   * Not every SMART server accepts a public client. Cigna's
+   * `.well-known/smart-configuration` advertises
+   * `client-confidential-symmetric` and no `code_challenge_methods_supported`,
+   * which means it wants a secret and will reject the PKCE-only flow Epic
+   * accepts. The two are not alternatives to choose between — the server
+   * decides, and the capability list is where it says so.
+   */
+  clientSecret?: string;
 }): Promise<Token> {
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code: opts.code,
+    redirect_uri: opts.redirectUri,
+    client_id: opts.clientId,
+  });
+  // PKCE is still sent alongside a secret where supported; servers that ignore
+  // it are unharmed, and it costs nothing to keep the protection.
+  if (opts.verifier) body.set("code_verifier", opts.verifier);
+
+  const headers: Record<string, string> = {
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  if (opts.clientSecret) {
+    // HTTP Basic is the form every SMART server accepts; a secret in the body
+    // is optional and inconsistently supported.
+    headers.authorization = `Basic ${Buffer.from(`${opts.clientId}:${opts.clientSecret}`).toString("base64")}`;
+  }
+
   const res = await fetch(`${opts.authBase}/token`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      code: opts.code,
-      redirect_uri: opts.redirectUri,
-      client_id: opts.clientId,
-      code_verifier: opts.verifier,
-    }),
+    headers,
+    body,
   });
 
   if (!res.ok) throw new Error(`token exchange failed: ${res.status} ${await res.text()}`);
@@ -127,10 +151,18 @@ export async function refresh(opts: {
   authBase: string;
   clientId: string;
   refreshToken: string;
+  clientSecret?: string;
 }): Promise<Token> {
+  const headers: Record<string, string> = {
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  if (opts.clientSecret) {
+    headers.authorization = `Basic ${Buffer.from(`${opts.clientId}:${opts.clientSecret}`).toString("base64")}`;
+  }
+
   const res = await fetch(`${opts.authBase}/token`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers,
     body: new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: opts.refreshToken,
@@ -368,4 +400,77 @@ export async function findProviders(query: string): Promise<Provider[]> {
  */
 export function authBaseFor(fhirBase: string): string {
   return fhirBase.replace(/\/api\/FHIR\/(R4|DSTU2|STU3)\/?$/i, "/oauth2");
+}
+
+// ---------------------------------------------------------------------------
+// Asking the server how to talk to it
+// ---------------------------------------------------------------------------
+
+export type SmartConfig = {
+  authorizationEndpoint: string | null;
+  tokenEndpoint: string | null;
+  /** True when the server wants a client secret rather than a public client. */
+  confidential: boolean;
+  /** True when PKCE is advertised. */
+  pkce: boolean;
+  scopes: string[];
+  capabilities: string[];
+};
+
+/**
+ * Read `.well-known/smart-configuration`.
+ *
+ * Worth doing rather than hardcoding, and this is not theoretical: Epic accepts
+ * a public client with PKCE, and Cigna advertises
+ * `client-confidential-symmetric` with no PKCE methods at all. Guessing wrong
+ * fails at the token exchange, after the user has already logged in — the worst
+ * place to discover a configuration error.
+ *
+ * Cigna's own documentation portal is a JavaScript application that cannot be
+ * read by a script; this endpoint is the same information in a form a machine
+ * can use, published by the server rather than written about it.
+ */
+export async function smartConfig(fhirBase: string): Promise<SmartConfig | null> {
+  try {
+    const res = await fetch(`${fhirBase.replace(/\/+$/, "")}/.well-known/smart-configuration`, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) return null;
+
+    const d = (await res.json()) as {
+      authorization_endpoint?: string;
+      token_endpoint?: string;
+      scopes_supported?: string[];
+      capabilities?: string[];
+      code_challenge_methods_supported?: string[];
+    };
+
+    const caps = d.capabilities ?? [];
+    return {
+      authorizationEndpoint: d.authorization_endpoint ?? null,
+      tokenEndpoint: d.token_endpoint ?? null,
+      confidential: caps.some((c) => c.includes("confidential")),
+      pkce: (d.code_challenge_methods_supported ?? []).includes("S256"),
+      scopes: d.scopes_supported ?? [],
+      capabilities: caps,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Which resources a server actually offers, from its capability statement. */
+export async function supportedResources(fhirBase: string): Promise<string[]> {
+  try {
+    const res = await fetch(`${fhirBase.replace(/\/+$/, "")}/metadata`, {
+      headers: { accept: "application/fhir+json" },
+      signal: AbortSignal.timeout(25_000),
+    });
+    if (!res.ok) return [];
+    const d = (await res.json()) as { rest?: { resource?: { type?: string }[] }[] };
+    return (d.rest?.[0]?.resource ?? []).map((r) => r.type).filter((t): t is string => Boolean(t));
+  } catch {
+    return [];
+  }
 }

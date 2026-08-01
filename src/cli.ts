@@ -17,6 +17,8 @@ import {
   poll,
   saveToken,
   RESOURCES,
+  smartConfig,
+  supportedResources,
   storeResources,
   findProviders,
   authBaseFor,
@@ -362,24 +364,76 @@ record locator an individual has.
         }
         console.log(`  Pulls: ${PAYER_RESOURCES.map((r) => r.type).join(", ")}\n`);
         console.log(`  Once registered:
-    export PAYER_CLIENT_ID=<client id>
     export PAYER_FHIR_BASE=<from the portal>
-    export PAYER_AUTH_BASE=<from the portal>
+    export PAYER_CLIENT_ID=<client id>
+    export PAYER_CLIENT_SECRET=<client secret, if the server is confidential>
+
+    longitude payer check    confirm the endpoints and what is missing
     longitude payer login
-    longitude payer pull`);
+    longitude payer pull
+
+  The authorize and token URLs are discovered from the server, so they do
+  not need setting. Register this redirect URI exactly:
+    http://localhost:4000/callback`);
         db.close();
         break;
       }
 
       const clientId = process.env.PAYER_CLIENT_ID;
+      const clientSecret = process.env.PAYER_CLIENT_SECRET;
       const fhirBase = process.env.PAYER_FHIR_BASE;
-      const authBase = process.env.PAYER_AUTH_BASE;
-      const redirectUri = "http://localhost:4000/epic/callback";
+      const redirectUri = process.env.PAYER_REDIRECT_URI ?? "http://localhost:4000/callback";
+
+      /**
+       * Ask the server how to talk to it rather than being told twice.
+       *
+       * `.well-known/smart-configuration` carries the authorize and token
+       * endpoints, so only the FHIR base has to be configured. It also says
+       * whether the server wants a confidential client — Cigna advertises
+       * `client-confidential-symmetric` and no PKCE, Epic accepts a public
+       * client with PKCE, and guessing wrong fails at the token exchange after
+       * the user has already logged in.
+       */
+      const discovered = fhirBase ? await smartConfig(fhirBase) : null;
+      const authBase =
+        process.env.PAYER_AUTH_BASE ??
+        discovered?.authorizationEndpoint?.replace(/\/authorize$/, "") ??
+        null;
+
+      if (sub === "check") {
+        if (!fhirBase) {
+          console.error("PAYER_FHIR_BASE must be set.");
+          process.exit(1);
+        }
+        const res = await supportedResources(fhirBase);
+        console.log(`${fhirBase}\n`);
+        if (!discovered) {
+          console.log("  no .well-known/smart-configuration — endpoints must be set by hand");
+        } else {
+          console.log(`  authorize   ${discovered.authorizationEndpoint ?? "—"}`);
+          console.log(`  token       ${discovered.tokenEndpoint ?? "—"}`);
+          console.log(`  client      ${discovered.confidential ? "confidential — needs PAYER_CLIENT_SECRET" : "public — PKCE only"}`);
+          console.log(`  PKCE        ${discovered.pkce ? "supported" : "not advertised"}`);
+        }
+        console.log(`  resources   ${res.length}${res.length ? `: ${res.join(", ")}` : ""}`);
+        console.log(`\n  client id   ${clientId ? "set" : "NOT SET — PAYER_CLIENT_ID"}`);
+        console.log(`  secret      ${clientSecret ? "set" : discovered?.confidential ? "NOT SET — PAYER_CLIENT_SECRET, and this server needs one" : "not needed"}`);
+        console.log(`  redirect    ${redirectUri}   ← register this exact string`);
+        db.close();
+        break;
+      }
 
       if (sub === "login") {
         if (!clientId || !fhirBase || !authBase) {
-          console.error("PAYER_CLIENT_ID, PAYER_FHIR_BASE and PAYER_AUTH_BASE must be set.");
-          console.error("Run `longitude payer` for where to register.");
+          console.error("PAYER_CLIENT_ID and PAYER_FHIR_BASE must be set.");
+          console.error("Run `longitude payer check` to see what is missing.");
+          process.exit(1);
+        }
+        if (discovered?.confidential && !clientSecret) {
+          console.error(
+            "This server advertises a confidential client but PAYER_CLIENT_SECRET is unset.\n" +
+              "The login would succeed and the token exchange would then fail.",
+          );
           process.exit(1);
         }
         const { verifier, challenge } = pkce();
@@ -392,6 +446,9 @@ record locator an individual has.
           hostname: "127.0.0.1",
           fetch(req) {
             const u = new URL(req.url);
+            if (u.pathname !== new URL(redirectUri).pathname) {
+              return new Response("", { status: 404 });
+            }
             if (u.searchParams.get("state") !== state) return new Response("state mismatch", { status: 400 });
             const code = u.searchParams.get("code");
             if (!code) return new Response("no code", { status: 400 });
@@ -407,7 +464,14 @@ record locator an individual has.
         const code = await done.promise;
         server.stop();
 
-        const token = await exchangeCode({ authBase, clientId, redirectUri, code, verifier });
+        const token = await exchangeCode({
+          authBase,
+          clientId,
+          clientSecret,
+          redirectUri,
+          code,
+          verifier,
+        });
         saveToken(db, fhirBase, token);
         console.log(`connected. member ${token.patient ?? "(none returned)"}`);
         db.close();
