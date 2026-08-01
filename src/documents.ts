@@ -213,13 +213,8 @@ export async function ingestFile(
       new Date().toISOString(),
     ) as { id: number };
 
-  if (text) {
-    db.prepare(`INSERT INTO documents_fts (rowid, title, text) VALUES (?, ?, ?)`).run(
-      row.id,
-      title,
-      text,
-    );
-  }
+  // The search index is maintained by triggers on `documents`. Writing to it
+  // here as well would insert every document twice and, on delete, corrupt it.
 
   return {
     id: row.id,

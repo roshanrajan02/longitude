@@ -230,6 +230,33 @@ CREATE INDEX IF NOT EXISTS documents_kind_idx ON documents (kind);
 
 -- Full-text search over everything extracted, so a note from 2019 is findable
 -- by what it says rather than by remembering when it happened.
+--
+-- External content: the index stores no copy of the text, only the terms, and
+-- reads the originals back from `documents`. That halves the storage and means
+-- there is exactly one copy of the truth.
+--
+-- The cost is that it cannot be written to directly. Inserting or deleting rows
+-- in `documents_fts` by hand desynchronises it from the table and SQLite then
+-- reports SQLITE_CORRUPT_VTAB — which is what a manual DELETE produced here.
+-- The triggers below are the supported way to keep them together, and mean no
+-- caller has to remember to.
 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
   title, text, content='documents', content_rowid='id'
 );
+
+CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+  INSERT INTO documents_fts (rowid, title, text) VALUES (new.id, new.title, new.text);
+END;
+
+-- Deletes and updates use the 'delete' command with the *old* values, which is
+-- how FTS5 finds the terms it needs to remove.
+CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+  INSERT INTO documents_fts (documents_fts, rowid, title, text)
+    VALUES ('delete', old.id, old.title, old.text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+  INSERT INTO documents_fts (documents_fts, rowid, title, text)
+    VALUES ('delete', old.id, old.title, old.text);
+  INSERT INTO documents_fts (rowid, title, text) VALUES (new.id, new.title, new.text);
+END;
