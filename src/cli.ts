@@ -373,8 +373,17 @@ record locator an individual has.
     longitude payer pull
 
   The authorize and token URLs are discovered from the server, so they do
-  not need setting. Register this redirect URI exactly:
-    http://localhost:4000/callback`);
+  not need setting.
+
+  Redirect URI. Try these in order — portals disagree about what they accept:
+    http://localhost:4000/callback
+    http://127.0.0.1:4000/callback
+    https://localhost:4000/callback
+
+  Whatever you register, set PAYER_REDIRECT_URI to that exact string. If the
+  portal will not take any localhost address, register anything it accepts and
+  run with PAYER_PASTE_CODE=1 — you then paste the URL you land on, which works
+  no matter where the redirect points.`);
         db.close();
         break;
       }
@@ -440,29 +449,112 @@ record locator an individual has.
         const state = Math.random().toString(36).slice(2);
         const url = authUrl({ authBase, clientId, redirectUri, challenge, state, aud: fhirBase });
 
-        const done = Promise.withResolvers<string>();
-        const server = Bun.serve({
-          port: 4000,
-          hostname: "127.0.0.1",
-          fetch(req) {
-            const u = new URL(req.url);
-            if (u.pathname !== new URL(redirectUri).pathname) {
-              return new Response("", { status: 404 });
-            }
-            if (u.searchParams.get("state") !== state) return new Response("state mismatch", { status: 400 });
-            const code = u.searchParams.get("code");
-            if (!code) return new Response("no code", { status: 400 });
-            done.resolve(code);
-            return new Response("<h3>Connected.</h3><p>Close this tab.</p>", {
-              headers: { "content-type": "text/html" },
-            });
-          },
-        });
-
         console.log(`opening your insurer's member login…\n  ${url}\n`);
-        Bun.spawn(["open", url]);
-        const code = await done.promise;
-        server.stop();
+
+        /**
+         * Two ways to get the code back, because portals disagree about
+         * redirect URIs.
+         *
+         * The listener is the pleasant path. But some registration forms refuse
+         * `http://`, some refuse `localhost` in any form, and some demand a
+         * publicly resolvable host — in which case nothing on this machine will
+         * ever receive the redirect. Pasting the code out of the address bar
+         * works against every one of them, so it is offered rather than kept as
+         * a secret for when the first path fails.
+         */
+        let code: string | null = null;
+
+        if (!process.env.PAYER_PASTE_CODE) {
+          const done = Promise.withResolvers<string>();
+          const redirect = new URL(redirectUri);
+          let server: ReturnType<typeof Bun.serve> | null = null;
+
+          try {
+            server = Bun.serve({
+              port: Number(redirect.port || 80),
+              hostname: "127.0.0.1",
+              fetch(req) {
+                const u = new URL(req.url);
+                if (u.pathname !== redirect.pathname) return new Response("", { status: 404 });
+                if (u.searchParams.get("state") !== state) {
+                  return new Response("state mismatch", { status: 400 });
+                }
+                const c = u.searchParams.get("code");
+                if (!c) {
+                  const err = u.searchParams.get("error_description") ?? u.searchParams.get("error");
+                  return new Response(`<h3>Rejected</h3><p>${err ?? "no code returned"}</p>`, {
+                    headers: { "content-type": "text/html" },
+                  });
+                }
+                done.resolve(c);
+                return new Response("<h3>Connected.</h3><p>Close this tab.</p>", {
+                  headers: { "content-type": "text/html" },
+                });
+              },
+            });
+          } catch (err) {
+            console.log(`  (could not listen on ${redirectUri}: ${String(err).slice(0, 60)})`);
+          }
+
+          Bun.spawn(["open", url]);
+
+          if (server) {
+            console.log(`  waiting for the redirect on ${redirectUri}`);
+            console.log(`  if nothing happens, press Ctrl-C and re-run with PAYER_PASTE_CODE=1\n`);
+            code = await done.promise;
+            server.stop();
+          }
+        }
+
+        if (!code) {
+          /**
+           * Paste path. The code is in the address bar after the redirect,
+           * whether or not anything was listening for it — a failed redirect
+           * still shows the URL it tried to reach.
+           */
+          Bun.spawn(["open", url]);
+          console.log("  Log in, then copy the whole URL you land on and paste it here.");
+          console.log("  It will look like:  <redirect>?code=…&state=…\n");
+          process.stdout.write("  URL: ");
+
+          for await (const line of console) {
+            const raw = line.trim();
+            if (!raw) continue;
+            try {
+              const u = new URL(raw);
+              const got = u.searchParams.get("code");
+              const gotState = u.searchParams.get("state");
+              if (!got) {
+                const err = u.searchParams.get("error_description") ?? u.searchParams.get("error");
+                console.log(`  no code in that URL${err ? `: ${err}` : ""}. Try again.`);
+                process.stdout.write("  URL: ");
+                continue;
+              }
+              // Checked rather than assumed: the state is the only defence
+              // against pasting a URL from a different login attempt.
+              if (gotState && gotState !== state) {
+                console.log("  that URL is from a different login attempt. Try again.");
+                process.stdout.write("  URL: ");
+                continue;
+              }
+              code = got;
+              break;
+            } catch {
+              // A bare code rather than a whole URL is fine too.
+              if (/^[A-Za-z0-9._~-]{8,}$/.test(raw)) {
+                code = raw;
+                break;
+              }
+              console.log("  that is not a URL or a code. Try again.");
+              process.stdout.write("  URL: ");
+            }
+          }
+        }
+
+        if (!code) {
+          console.error("no authorization code");
+          process.exit(1);
+        }
 
         const token = await exchangeCode({
           authBase,

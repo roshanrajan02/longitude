@@ -260,3 +260,41 @@ CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
     VALUES ('delete', old.id, old.title, old.text);
   INSERT INTO documents_fts (rowid, title, text) VALUES (new.id, new.title, new.text);
 END;
+
+-- ---------------------------------------------------------------------------
+-- labs — results, normalised out of wherever they arrived.
+--
+-- A lab value reaches you three ways: as a FHIR Observation from a provider or
+-- payer, as a row in a C-CDA table, or as text in a PDF. All three are the same
+-- fact and none of them is queryable in the form it arrives — a JSON blob in
+-- `clinical` cannot be charted, and neither can a sentence in a discharge
+-- summary.
+--
+-- This is the table that makes the crossover possible. Putting an A1c next to
+-- the resting heart rate of the six weeks before it needs both to be rows with
+-- a value and a date, not a document and a sample stream.
+--
+-- `loinc` is nullable on purpose. A PDF says "Sodium 141 mmol/L" and carries no
+-- code at all; refusing the value for want of a code would discard most of what
+-- is actually retrievable.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS labs (
+  id           INTEGER PRIMARY KEY,
+  name         TEXT NOT NULL,           -- as reported: "Hemoglobin A1c"
+  slug         TEXT NOT NULL,           -- normalised for grouping: hemoglobin_a1c
+  loinc        TEXT,
+  value        REAL,
+  value_text   TEXT,                    -- when the result is not a number
+  unit         TEXT,
+  ref_low      REAL,
+  ref_high     REAL,
+  abnormal     TEXT,                    -- H, L, or null
+  taken_at     TEXT NOT NULL,
+  /** Where it came from, so a disagreement between sources can be traced. */
+  origin       TEXT NOT NULL,           -- fhir, ccda, document
+  source       TEXT,                    -- the provider or payer
+  document_id  INTEGER,
+  dedupe_key   TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS labs_slug_time_idx ON labs (slug, taken_at);
+CREATE INDEX IF NOT EXISTS labs_time_idx ON labs (taken_at);
